@@ -907,6 +907,51 @@ LOG_MESSAGE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+DELETE_INTENT_PATTERN = re.compile(r"\b(delete|remove|unlog|undo)\b", flags=re.IGNORECASE)
+DELETE_LOG_CONTEXT_PATTERN = re.compile(
+    r"\b(log|logged|add|added|track|tracked|entry|entries|tracker|food\s*log|meal\s*log)\b",
+    flags=re.IGNORECASE,
+)
+EXPLICIT_DELETE_COMMAND_PATTERN = re.compile(r"^\s*(delete|unlog)\b", flags=re.IGNORECASE)
+DELETE_LAST_PATTERN = re.compile(r"\b(delete|remove|unlog|undo)\s+(?:the\s+)?(last|latest)\b", flags=re.IGNORECASE)
+UUID_PATTERN = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    flags=re.IGNORECASE,
+)
+DELETE_NAME_PATTERN = re.compile(
+    r"\b(?:delete|remove|unlog)\s+(?:the\s+)?(?:entry\s+)?(?P<name>.+)$",
+    flags=re.IGNORECASE,
+)
+LOG_CREATE_INTENT_PATTERN = re.compile(r"\b(log|add|track)\b", flags=re.IGNORECASE)
+DELETE_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "my",
+    "our",
+    "your",
+    "this",
+    "that",
+    "it",
+    "meal",
+    "food",
+    "entry",
+    "item",
+    "i",
+    "we",
+    "logged",
+    "added",
+    "tracked",
+    "earlier",
+    "today",
+    "yesterday",
+    "just",
+    "please",
+    "from",
+    "in",
+    "log",
+}
+
 
 def parse_log_message(message: str) -> FoodEntryCreate | None:
     match = LOG_MESSAGE_PATTERN.match(message)
@@ -921,6 +966,66 @@ def parse_log_message(message: str) -> FoodEntryCreate | None:
         fat_g=float(match.group("fat")),
         logged_at=to_utc_iso(utc_now()),
     )
+
+
+def normalize_delete_name(raw_name: str) -> str:
+    trimmed = raw_name.strip().lower()
+    trimmed = re.sub(r"\b(from|in)\s+(my|the)?\s*log\b.*$", "", trimmed)
+    trimmed = re.sub(r"\b(?:that\s+)?(?:i|we)\s+(?:logged|added|tracked)\b.*$", "", trimmed)
+    trimmed = re.sub(r"\b(?:earlier|today|yesterday|just now)\b.*$", "", trimmed)
+    trimmed = re.sub(r"^(the|my|our|a|an)\s+", "", trimmed)
+    trimmed = re.sub(r"\b(today|please)\b", "", trimmed)
+    trimmed = re.sub(r"[^\w\s-]", "", trimmed)
+    return " ".join(trimmed.split())
+
+
+def resolve_delete_target(message: str, entries: list[FoodEntry]) -> tuple[FoodEntry | None, bool]:
+    has_delete_verb = DELETE_INTENT_PATTERN.search(message) is not None
+    if not has_delete_verb:
+        return None, False
+
+    has_log_context = DELETE_LOG_CONTEXT_PATTERN.search(message) is not None
+    has_explicit_command = EXPLICIT_DELETE_COMMAND_PATTERN.search(message) is not None
+    has_last_phrase = DELETE_LAST_PATTERN.search(message) is not None
+    has_uuid = UUID_PATTERN.search(message) is not None
+    clear_delete_signal = has_log_context or has_explicit_command or has_last_phrase or has_uuid
+
+    if not entries:
+        return None, clear_delete_signal
+
+    ordered_entries = sorted(entries, key=lambda entry: entry.logged_at, reverse=True)
+    lowered_message = message.lower()
+
+    if has_last_phrase or "last" in lowered_message or "latest" in lowered_message:
+        return ordered_entries[0], True
+
+    id_match = UUID_PATTERN.search(message)
+    if id_match is not None:
+        target_id = id_match.group(0).lower()
+        for entry in ordered_entries:
+            if entry.id.lower() == target_id:
+                return entry, True
+
+    name_match = DELETE_NAME_PATTERN.search(message)
+    if name_match is not None:
+        normalized_query = normalize_delete_name(name_match.group("name"))
+        if normalized_query:
+            for entry in ordered_entries:
+                if entry.name.strip().lower() == normalized_query:
+                    return entry, True
+
+            query_tokens = [
+                token
+                for token in normalized_query.split()
+                if token and token not in DELETE_TOKEN_STOPWORDS
+            ]
+            if query_tokens:
+                for entry in ordered_entries:
+                    name_lower = entry.name.strip().lower()
+                    if all(token in name_lower for token in query_tokens):
+                        return entry, True
+
+    return None, clear_delete_signal
 
 
 store = SQLiteStore(DB_PATH)
@@ -1033,6 +1138,31 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     today_entries = store.get_log_for_date(today)
     local_dt, timezone_name, meal_window = resolve_chat_time_context(payload.context)
 
+    delete_target, is_delete_intent = resolve_delete_target(user_message, today_entries)
+    if is_delete_intent:
+        if delete_target is None:
+            if not today_entries:
+                reply = "There are no entries in today's log to delete."
+            else:
+                recent_names = ", ".join(entry.name for entry in sorted(today_entries, key=lambda e: e.logged_at, reverse=True)[:3])
+                reply = (
+                    "I couldn't find a matching entry to delete. "
+                    f"Try 'delete last' or use one of: {recent_names}."
+                )
+            store.insert_chat_message(role="assistant", content=reply)
+            return ChatResponse(reply=reply, created_entries=[])
+
+        deleted = store.delete_food_entry(delete_target.id)
+        if deleted:
+            reply = (
+                f"Deleted '{delete_target.name}' from today's log "
+                f"({delete_target.calories} cal, {delete_target.protein_g:.0f}p/{delete_target.carbs_g:.0f}c/{delete_target.fat_g:.0f}f)."
+            )
+        else:
+            reply = "I couldn't delete that entry because it was already removed."
+        store.insert_chat_message(role="assistant", content=reply)
+        return ChatResponse(reply=reply, created_entries=[])
+
     lat = payload.context.lat if payload.context else None
     lng = payload.context.lng if payload.context else None
     nearby_places: list[NearbyPlace] = []
@@ -1087,7 +1217,12 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         )
 
     created_entries: list[FoodEntry] = []
-    for draft in plan.entries_to_log[:10]:
+    allow_log_creation = bool(LOG_CREATE_INTENT_PATTERN.search(user_message))
+    entries_to_insert = plan.entries_to_log[:10] if allow_log_creation else []
+    if plan.entries_to_log and not allow_log_creation:
+        LOGGER.info("Ignoring Claude entries_to_log because user message did not request log adjustment")
+
+    for draft in entries_to_insert:
         payload_to_insert = FoodEntryCreate(
             name=draft.name,
             calories=draft.calories,

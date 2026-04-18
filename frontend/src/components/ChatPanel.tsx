@@ -86,7 +86,7 @@ export default function ChatPanel({ messages, onNewMessage, backendOnline, chatC
           <div className="flex items-center justify-center h-full">
             <p className="text-xs text-[#a1a1aa] text-center leading-relaxed">
               Ask me about healthy food options nearby,<br />
-              nutrition info, or dietary recommendations.
+              nutrition info, or say "delete last" to remove a log item.
             </p>
           </div>
         )}

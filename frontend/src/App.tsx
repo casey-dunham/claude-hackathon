@@ -44,6 +44,24 @@ function recommendationScore(place: NearbyPlace): number {
   return openScore + ratingScore - distancePenalty;
 }
 
+function LogSourceIcon({ source }: { source: FoodEntry['source'] }) {
+  if (source === 'chat') {
+    return (
+      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-[#2563eb]" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M21 11.5a8.5 8.5 0 1 1-4.2-7.4" />
+        <path d="M21 4v6h-6" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-[#16a34a]" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [userLat, setUserLat] = useState(DEFAULT_LAT);
   const [userLng, setUserLng] = useState(DEFAULT_LNG);
@@ -201,7 +219,7 @@ export default function App() {
             }}
           />
           <p className="mt-2 text-xs text-[#a1a1aa]">
-            Try: Recommend a high-protein {currentMealWindow} near me
+            Try: Recommend a high-protein {currentMealWindow} near me, or type "delete last"
           </p>
         </section>
 
@@ -220,17 +238,24 @@ export default function App() {
                   className="rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-4 py-3"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-[#18181b]">{entry.name}</p>
+                    <div className="flex items-start gap-2.5">
+                      <div className="mt-0.5 rounded-md bg-white p-1.5 ring-1 ring-[#e4e4e7]">
+                        <LogSourceIcon source={entry.source} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-[#18181b]">{entry.name}</p>
+                        <p className="mt-0.5 text-xs text-[#a1a1aa]">
+                          {formatDateTime(entry.logged_at)} · {entry.source}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-medium text-[#18181b]">{entry.calories} kcal</p>
                       <p className="mt-0.5 text-xs text-[#a1a1aa]">
-                        {formatDateTime(entry.logged_at)} · {entry.source}
+                        P {entry.protein_g}g · C {entry.carbs_g}g · F {entry.fat_g}g
                       </p>
                     </div>
-                    <p className="text-sm font-medium text-[#18181b]">{entry.calories} kcal</p>
                   </div>
-                  <p className="mt-2 text-xs text-[#71717a]">
-                    P {entry.protein_g}g · C {entry.carbs_g}g · F {entry.fat_g}g
-                  </p>
                 </div>
               ))}
             </div>
