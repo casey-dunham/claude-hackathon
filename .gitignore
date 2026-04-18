@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 backend/litesql.db
 backend/litesql.db-*
+.superpowers/
+node_modules/
+dist/
