@@ -61,6 +61,9 @@ pip install -r requirements.txt
 
 ```env
 CLAUDE_API_KEY=
+CLAUDE_MODEL=claude-opus-4-6
+# Optional: Claude API timeout in seconds
+# CLAUDE_TIMEOUT_SECONDS=8
 # Optional: override sqlite file path
 # LITESQL_PATH=backend/litesql.db
 ```
@@ -139,25 +142,25 @@ curl -X POST http://localhost:8000/api/chat \
 
 ## Chat behavior (current)
 
-`POST /api/chat` currently supports a structured quick-log format:
+`POST /api/chat` uses Claude (Anthropic Messages API) to:
+
+- log food entries from natural language
+- provide nutrition and meal recommendations
+- return any created log entries in `created_entries`
+
+The backend still supports this quick-log format as a fallback:
 
 ```text
 log <name> <calories> cal <protein>p <carbs>c <fat>f
 ```
 
-Example:
+Example quick-log command:
 
 ```text
 log grilled chicken 300 cal 40p 0c 8f
 ```
 
-If parsing succeeds:
-- one food entry is created
-- response `created_entries` includes that entry
-
-If parsing fails:
-- no entry is created
-- assistant returns usage guidance
+If Claude is unavailable, the backend falls back to local quick-log parsing and usage guidance.
 
 ## Data persistence
 

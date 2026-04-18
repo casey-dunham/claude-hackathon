@@ -228,6 +228,26 @@ def test_chat_returns_reply_and_created_entries_shape(client: TestClient) -> Non
         assert_food_entry_shape(created_entry)
 
 
+def test_chat_quick_log_creates_chat_entry(client: TestClient) -> None:
+    marker = f"chat-log-{uuid.uuid4()}"
+    response = client.post(
+        "/api/chat",
+        json={"message": f"log {marker} 320 cal 28p 36c 9f"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert isinstance(payload, dict)
+    assert isinstance(payload.get("reply"), str)
+    assert isinstance(payload.get("created_entries"), list)
+    assert len(payload["created_entries"]) >= 1
+
+    created_entry = payload["created_entries"][0]
+    assert_food_entry_shape(created_entry)
+    assert created_entry["name"] == marker
+    assert created_entry["source"] == "chat"
+
+
 def test_chat_history_returns_messages_oldest_to_newest(client: TestClient) -> None:
     response = client.get("/api/chat/history", params={"limit": 50})
     assert response.status_code == 200
@@ -241,4 +261,3 @@ def test_chat_history_returns_messages_oldest_to_newest(client: TestClient) -> N
         parsed_datetimes.append(_parse_utc_datetime(message["created_at"]))
 
     assert parsed_datetimes == sorted(parsed_datetimes), "Chat history must be oldest -> newest"
-
