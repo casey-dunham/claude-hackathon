@@ -75,6 +75,42 @@ Common codes: `not_found`, `invalid_request`, `upstream_error`, `server_error`.
 }
 ```
 
+### NearbyPlace
+
+```json
+{
+  "id": "string",
+  "name": "string",
+  "type": "restaurant | cafe | grocery | deli | food_truck | juice_bar",
+  "lat": 0.0,
+  "lng": 0.0,
+  "distance_m": 0,
+  "address": "string",
+  "rating": 4.5,
+  "price_level": 1,
+  "is_open": true
+}
+```
+
+### Recommendation
+
+```json
+{
+  "id": "string",
+  "place_id": "string",
+  "place_name": "string",
+  "item_name": "string",
+  "description": "string",
+  "estimated_calories": 0,
+  "estimated_protein_g": 0,
+  "estimated_carbs_g": 0,
+  "estimated_fat_g": 0,
+  "estimated_price_usd": 0.00,
+  "tags": ["high-protein", "low-carb"],
+  "distance_m": 0
+}
+```
+
 ---
 
 ## 3. Food Log
@@ -167,6 +203,76 @@ Response `200`:
 ```
 
 Ordered oldest → newest.
+
+---
+
+## 7. Nearby Food Options
+
+Location-aware food discovery. The frontend sends the user's coordinates and gets back nearby places with healthy options.
+
+### `GET /api/nearby`
+
+Query params:
+- `lat` (required, float) — user latitude
+- `lng` (required, float) — user longitude
+- `radius` (optional, int, default `1500`, max `5000`) — search radius in meters
+
+Response `200`:
+```json
+{ "places": [NearbyPlace, ...] }
+```
+
+### NearbyPlace model:
+```json
+{
+  "id": "string",
+  "name": "string",
+  "type": "restaurant | cafe | grocery | deli | food_truck | juice_bar",
+  "lat": 0.0,
+  "lng": 0.0,
+  "distance_m": 0,
+  "address": "string",
+  "rating": 4.5,
+  "price_level": 1,
+  "is_open": true
+}
+```
+
+---
+
+## 8. Recommendations
+
+AI-powered food recommendations from nearby places with nutrition estimates.
+
+### `GET /api/recommendations`
+
+Query params:
+- `lat` (required, float)
+- `lng` (required, float)
+- `radius` (optional, int, default `1500`)
+
+Response `200`:
+```json
+{ "recommendations": [Recommendation, ...] }
+```
+
+### Recommendation model:
+```json
+{
+  "id": "string",
+  "place_id": "string",
+  "place_name": "string",
+  "item_name": "string",
+  "description": "string",
+  "estimated_calories": 0,
+  "estimated_protein_g": 0,
+  "estimated_carbs_g": 0,
+  "estimated_fat_g": 0,
+  "estimated_price_usd": 0.00,
+  "tags": ["high-protein", "low-carb"],
+  "distance_m": 0
+}
+```
 
 ---
 

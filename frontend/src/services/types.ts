@@ -1,54 +1,39 @@
-export interface User {
+export interface NearbyPlace {
   id: string;
   name: string;
-  initials: string;
-  plan: string;
+  type: 'restaurant' | 'cafe' | 'grocery' | 'deli' | 'food_truck' | 'juice_bar';
+  lat: number;
+  lng: number;
+  distance_m: number;
+  address: string;
+  rating: number;
+  price_level: number; // 1-3
+  is_open: boolean;
 }
 
-export interface MacroSummary {
-  calories: { current: number; goal: number };
-  protein: { current: number; goal: number };
-  carbs: { current: number; goal: number };
-  fat: { current: number; goal: number };
-}
-
-export interface Meal {
+export interface Recommendation {
   id: string;
-  name: string;
-  time: string;
-  calories: number;
-  protein: number;
-  carbs: number;
-  fat: number;
-  logged: boolean;
+  place_id: string;
+  place_name: string;
+  item_name: string;
+  description: string;
+  estimated_calories: number;
+  estimated_protein_g: number;
+  estimated_carbs_g: number;
+  estimated_fat_g: number;
+  estimated_price_usd: number;
+  tags: string[];
+  distance_m: number;
 }
 
-export interface HydrationData {
-  current: number;
-  goal: number;
-}
-
-export interface CoachMessage {
+export interface ChatMessage {
   id: string;
-  type: 'insight' | 'travel' | 'pattern';
-  label: string;
+  role: 'user' | 'assistant';
   content: string;
-  actionLabel?: string;
+  created_at: string;
 }
 
-export interface DaySummary {
-  date: string;
-  dayLabel: string;
-  calories: number;
-  caloriesGoal: number;
-  protein: number;
-  proteinGoal: number;
-}
-
-export interface TimelineBlock {
-  id: string;
-  period: 'morning' | 'midday' | 'evening';
-  label: string;
-  meal?: Meal;
-  suggestion?: string;
+export interface ChatResponse {
+  reply: string;
+  created_entries: any[];
 }
