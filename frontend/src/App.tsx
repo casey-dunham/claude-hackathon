@@ -185,10 +185,8 @@ export default function App() {
       <header className="border-b border-[#f0f0f0] bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#18181b] text-sm font-semibold text-white">
-              N
-            </div>
-            <span className="text-base font-semibold tracking-tight text-[#18181b]">NutriCoach MVP</span>
+            <img src="/nutricoach-logo-v2.png" alt="NutriCoach" className="h-6 w-auto" />
+            <img src="/nutricoach-wordmark.png" alt="NutriCoach" className="h-6 w-auto" />
           </div>
           <div className="flex items-center gap-1.5">
             <div className={`h-1.5 w-1.5 rounded-full ${backendOnline ? 'bg-green-500' : 'bg-[#d4d4d8]'}`} />
