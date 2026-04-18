@@ -1,0 +1,1 @@
+# defines the api contract that separates frontend and backend
