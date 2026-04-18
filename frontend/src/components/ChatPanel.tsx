@@ -6,9 +6,11 @@ interface Props {
   messages: ChatMessage[];
   onNewMessage: (userMsg: ChatMessage, assistantMsg: ChatMessage) => void;
   backendOnline: boolean;
+  userLat?: number;
+  userLng?: number;
 }
 
-export default function ChatPanel({ messages, onNewMessage, backendOnline }: Props) {
+export default function ChatPanel({ messages, onNewMessage, backendOnline, userLat, userLng }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -33,7 +35,7 @@ export default function ChatPanel({ messages, onNewMessage, backendOnline }: Pro
 
     try {
       if (backendOnline) {
-        const res = await sendChatMessage(text);
+        const res = await sendChatMessage(text, userLat, userLng);
         const assistantMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',

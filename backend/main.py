@@ -117,6 +117,8 @@ class DashboardHistoryResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+    lat: float | None = None
+    lng: float | None = None
 
 
 class ChatMessage(BaseModel):
@@ -137,6 +139,14 @@ class ChatResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
+
+
+class Profile(BaseModel):
+    calorie_goal: int | None = None
+    protein_goal_g: float | None = None
+    carbs_goal_g: float | None = None
+    fat_goal_g: float | None = None
+    dietary_restrictions: list[str] = Field(default_factory=list)
 
 
 class NearbyPlace(BaseModel):
@@ -197,6 +207,9 @@ Behavior rules:
 - `logged_at` is optional; omit it if unknown.
 - Do not include any keys other than `reply` and `entries_to_log`.
 - Do not wrap JSON in markdown.
+- When nearby_restaurants is provided and the user asks for food suggestions or what to eat, recommend specific dishes from those restaurants. Factor in their remaining calories, macro goals, and dietary restrictions.
+- When recommending restaurants, mention the restaurant name, what to order, and estimated macros if known.
+- Always respect dietary_restrictions — never suggest food that violates them.
 """.strip()
 
 
@@ -446,6 +459,8 @@ class ClaudeChatEngine:
         user_message: str,
         today_summary: DailySummary,
         today_entries: list[FoodEntry],
+        profile: Profile | None = None,
+        nearby_restaurants: list[NearbyPlace] | None = None,
     ) -> ClaudeChatPlan:
         if not self.enabled:
             raise APIError(
@@ -454,12 +469,35 @@ class ClaudeChatEngine:
                 message="Claude API key is not configured",
             )
 
-        prompt_payload = {
+        prompt_payload: dict[str, Any] = {
             "user_message": user_message,
             "utc_now": to_utc_iso(utc_now()),
             "today_summary": _model_to_dict(today_summary),
             "recent_entries_today": [_model_to_dict(entry) for entry in today_entries[-10:]],
         }
+
+        if profile:
+            prompt_payload["user_profile"] = {
+                "calorie_goal": profile.calorie_goal,
+                "protein_goal_g": profile.protein_goal_g,
+                "carbs_goal_g": profile.carbs_goal_g,
+                "fat_goal_g": profile.fat_goal_g,
+                "dietary_restrictions": profile.dietary_restrictions,
+            }
+
+        if nearby_restaurants:
+            prompt_payload["nearby_restaurants"] = [
+                {
+                    "name": p.name,
+                    "address": p.address,
+                    "distance_m": p.distance_m,
+                    "rating": p.rating,
+                    "price_level": p.price_level,
+                    "is_open": p.is_open,
+                    "maps_url": p.maps_url,
+                }
+                for p in nearby_restaurants[:10]
+            ]
 
         request_payload = {
             "model": self.model,
@@ -585,6 +623,17 @@ class SQLiteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at
                 ON chat_messages(created_at);
+
+                CREATE TABLE IF NOT EXISTS profile (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    calorie_goal INTEGER,
+                    protein_goal_g REAL,
+                    carbs_goal_g REAL,
+                    fat_goal_g REAL,
+                    dietary_restrictions TEXT NOT NULL DEFAULT '[]'
+                );
+
+                INSERT OR IGNORE INTO profile (id) VALUES (1);
                 """
             )
             conn.commit()
@@ -769,6 +818,43 @@ class SQLiteStore:
             for row in ordered_rows
         ]
 
+    def get_profile(self) -> Profile:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT calorie_goal, protein_goal_g, carbs_goal_g, fat_goal_g, dietary_restrictions FROM profile WHERE id = 1"
+            ).fetchone()
+        restrictions = json.loads(row["dietary_restrictions"]) if row["dietary_restrictions"] else []
+        return Profile(
+            calorie_goal=row["calorie_goal"],
+            protein_goal_g=row["protein_goal_g"],
+            carbs_goal_g=row["carbs_goal_g"],
+            fat_goal_g=row["fat_goal_g"],
+            dietary_restrictions=restrictions,
+        )
+
+    def update_profile(self, profile: Profile) -> Profile:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE profile SET
+                    calorie_goal = ?,
+                    protein_goal_g = ?,
+                    carbs_goal_g = ?,
+                    fat_goal_g = ?,
+                    dietary_restrictions = ?
+                WHERE id = 1
+                """,
+                (
+                    profile.calorie_goal,
+                    profile.protein_goal_g,
+                    profile.carbs_goal_g,
+                    profile.fat_goal_g,
+                    json.dumps(profile.dietary_restrictions),
+                ),
+            )
+            conn.commit()
+        return self.get_profile()
+
     @staticmethod
     def _row_to_food_entry(row: sqlite3.Row) -> FoodEntry:
         return FoodEntry(
@@ -915,6 +1001,19 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     today = today_utc_str()
     today_summary = store.get_daily_summary(today)
     today_entries = store.get_log_for_date(today)
+    profile = store.get_profile()
+
+    nearby_restaurants: list[NearbyPlace] = []
+    if payload.lat is not None and payload.lng is not None:
+        try:
+            nearby_restaurants = await google_places.nearby_restaurants(
+                lat=payload.lat,
+                lng=payload.lng,
+                radius_m=1200,
+                limit=10,
+            )
+        except Exception:
+            LOGGER.warning("Failed to fetch nearby places for chat context")
 
     if claude_chat.enabled:
         try:
@@ -922,6 +1021,8 @@ async def chat(payload: ChatRequest) -> ChatResponse:
                 user_message=user_message,
                 today_summary=today_summary,
                 today_entries=today_entries,
+                profile=profile,
+                nearby_restaurants=nearby_restaurants or None,
             )
         except APIError as exc:
             LOGGER.warning("Claude unavailable (%s): %s", exc.code, exc.message)
@@ -965,3 +1066,13 @@ async def chat(payload: ChatRequest) -> ChatResponse:
 @app.get("/api/chat/history", response_model=ChatHistoryResponse)
 async def chat_history(limit: int = Query(default=50, ge=1, le=500)) -> ChatHistoryResponse:
     return ChatHistoryResponse(messages=store.get_chat_history(limit))
+
+
+@app.get("/api/profile", response_model=Profile)
+async def get_profile() -> Profile:
+    return store.get_profile()
+
+
+@app.put("/api/profile", response_model=Profile)
+async def update_profile(payload: Profile) -> Profile:
+    return store.update_profile(payload)

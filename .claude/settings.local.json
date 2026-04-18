@@ -4,7 +4,9 @@
       "Bash(python3 -m pip show fastapi)",
       "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
       "Bash(pip show:*)",
-      "Bash(pip -V)"
+      "Bash(pip -V)",
+      "Bash(npm install:*)",
+      "Bash(npm list:*)"
     ]
   }
 }

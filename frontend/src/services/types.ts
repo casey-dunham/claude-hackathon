@@ -60,6 +60,14 @@ export interface HealthResponse {
   status: "ok";
 }
 
+export interface Profile {
+  calorie_goal: number | null;
+  protein_goal_g: number | null;
+  carbs_goal_g: number | null;
+  fat_goal_g: number | null;
+  dietary_restrictions: string[];
+}
+
 export interface CreateFoodEntryInput {
   name: string;
   calories: number;

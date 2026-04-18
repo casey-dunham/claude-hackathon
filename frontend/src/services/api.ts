@@ -7,6 +7,7 @@ import type {
   FoodLogResponse,
   HealthResponse,
   NearbyPlacesResponse,
+  Profile,
 } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
@@ -108,6 +109,10 @@ export async function getTodaySummary(): Promise<DailySummary> {
   return request<DailySummary>("/api/dashboard/today");
 }
 
+export async function getDashboardHistory(days = 7): Promise<{ days: DailySummary[] }> {
+  return request<{ days: DailySummary[] }>("/api/dashboard/history", undefined, { days });
+}
+
 export async function getLog(date?: string): Promise<FoodLogResponse> {
   return request<FoodLogResponse>("/api/log", undefined, { date });
 }
@@ -127,13 +132,24 @@ export async function getChatHistory(limit = 50): Promise<ChatHistoryResponse> {
   return request<ChatHistoryResponse>("/api/chat/history", undefined, { limit });
 }
 
-export async function postChat(message: string): Promise<ChatResponse> {
+export async function postChat(message: string, lat?: number, lng?: number): Promise<ChatResponse> {
   return request<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, lat, lng }),
   });
 }
 
-export async function sendChatMessage(message: string): Promise<ChatResponse> {
-  return postChat(message);
+export async function sendChatMessage(message: string, lat?: number, lng?: number): Promise<ChatResponse> {
+  return postChat(message, lat, lng);
+}
+
+export async function getProfile(): Promise<Profile> {
+  return request<Profile>("/api/profile");
+}
+
+export async function updateProfile(profile: Profile): Promise<Profile> {
+  return request<Profile>("/api/profile", {
+    method: "PUT",
+    body: JSON.stringify(profile),
+  });
 }
