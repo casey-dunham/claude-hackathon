@@ -1,39 +1,52 @@
-export interface NearbyPlace {
+export interface FoodEntry {
   id: string;
   name: string;
-  type: 'restaurant' | 'cafe' | 'grocery' | 'deli' | 'food_truck' | 'juice_bar';
-  lat: number;
-  lng: number;
-  distance_m: number;
-  address: string;
-  rating: number;
-  price_level: number; // 1-3
-  is_open: boolean;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  logged_at: string;
+  source: "manual" | "chat";
 }
 
-export interface Recommendation {
-  id: string;
-  place_id: string;
-  place_name: string;
-  item_name: string;
-  description: string;
-  estimated_calories: number;
-  estimated_protein_g: number;
-  estimated_carbs_g: number;
-  estimated_fat_g: number;
-  estimated_price_usd: number;
-  tags: string[];
-  distance_m: number;
+export interface DailySummary {
+  date: string;
+  total_calories: number;
+  total_protein_g: number;
+  total_carbs_g: number;
+  total_fat_g: number;
+  entry_count: number;
 }
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   created_at: string;
 }
 
+export interface FoodLogResponse {
+  entries: FoodEntry[];
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatMessage[];
+}
+
 export interface ChatResponse {
   reply: string;
-  created_entries: any[];
+  created_entries: FoodEntry[];
+}
+
+export interface HealthResponse {
+  status: "ok";
+}
+
+export interface CreateFoodEntryInput {
+  name: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  logged_at: string;
 }

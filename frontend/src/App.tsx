@@ -1,137 +1,157 @@
-import { useState, useEffect } from 'react';
-import FoodMap from './components/FoodMap';
-import RecommendationCard from './components/RecommendationCard';
+import { useEffect, useState } from 'react';
 import ChatPanel from './components/ChatPanel';
-import { NearbyPlace, Recommendation, ChatMessage } from './services/types';
-import { getNearbyPlaces } from './services/mock/places';
-import { getRecommendations } from './services/mock/recommendations';
-import { checkHealth, getChatHistory } from './services/api';
+import { getChatHistory, getHealth, getLog } from './services/api';
+import { ChatMessage, FoodEntry } from './services/types';
 
-// Default location (midtown Manhattan)
-const DEFAULT_LAT = 40.7549;
-const DEFAULT_LNG = -73.984;
+function sortEntries(entries: FoodEntry[]): FoodEntry[] {
+  return [...entries].sort(
+    (a, b) => new Date(b.logged_at).getTime() - new Date(a.logged_at).getTime()
+  );
+}
+
+function formatDateTime(isoValue: string): string {
+  return new Date(isoValue).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return 'Unable to load data from backend.';
+}
 
 export default function App() {
-  const [userLat, setUserLat] = useState(DEFAULT_LAT);
-  const [userLng, setUserLng] = useState(DEFAULT_LNG);
-  const [places, setPlaces] = useState<NearbyPlace[]>([]);
-  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [entries, setEntries] = useState<FoodEntry[]>([]);
   const [backendOnline, setBackendOnline] = useState(false);
-  const [locationStatus, setLocationStatus] = useState<'loading' | 'granted' | 'denied'>('loading');
+  const [isLogLoading, setIsLogLoading] = useState(true);
+  const [logError, setLogError] = useState<string | null>(null);
 
-  // Get user location
-  useEffect(() => {
-    if (!navigator.geolocation) {
-      setLocationStatus('denied');
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setUserLat(pos.coords.latitude);
-        setUserLng(pos.coords.longitude);
-        setLocationStatus('granted');
-      },
-      () => {
-        setLocationStatus('denied');
-      }
-    );
-  }, []);
+  async function refreshLog() {
+    const response = await getLog();
+    setEntries(sortEntries(response.entries));
+  }
 
-  // Load mock data when location is set
   useEffect(() => {
-    async function loadData() {
-      const [p, r] = await Promise.all([
-        getNearbyPlaces(userLat, userLng),
-        getRecommendations(userLat, userLng),
-      ]);
-      setPlaces(p);
-      setRecommendations(r);
-    }
-    loadData();
-  }, [userLat, userLng]);
+    let mounted = true;
 
-  // Check backend health + load chat history
-  useEffect(() => {
     async function init() {
-      const online = await checkHealth();
-      setBackendOnline(online);
-      if (online) {
-        try {
-          const history = await getChatHistory();
-          setChatMessages(history.messages);
-        } catch {
-          // ignore
-        }
+      setIsLogLoading(true);
+      setLogError(null);
+
+      try {
+        await getHealth();
+      } catch (error) {
+        if (!mounted) return;
+        setBackendOnline(false);
+        setLogError(errorMessage(error));
+        setIsLogLoading(false);
+        return;
       }
+
+      if (!mounted) return;
+      setBackendOnline(true);
+
+      const [historyResult, logResult] = await Promise.allSettled([getChatHistory(), getLog()]);
+
+      if (!mounted) return;
+
+      if (historyResult.status === 'fulfilled') {
+        setChatMessages(historyResult.value.messages);
+      }
+
+      if (logResult.status === 'fulfilled') {
+        setEntries(sortEntries(logResult.value.entries));
+      } else {
+        setLogError(errorMessage(logResult.reason));
+      }
+
+      setIsLogLoading(false);
     }
-    init();
+
+    void init();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   function handleNewMessage(userMsg: ChatMessage, assistantMsg: ChatMessage) {
     setChatMessages((prev) => [...prev, userMsg, assistantMsg]);
+    void refreshLog().then(
+      () => setLogError(null),
+      (error) => setLogError(errorMessage(error))
+    );
   }
 
   return (
     <div className="min-h-screen bg-[#fafafa]">
-      {/* Header */}
-      <header className="bg-white border-b border-[#f0f0f0]">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+      <header className="border-b border-[#f0f0f0] bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-[#18181b] rounded-lg flex items-center justify-center text-white text-sm font-semibold">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#18181b] text-sm font-semibold text-white">
               N
             </div>
-            <span className="text-base font-semibold text-[#18181b] tracking-tight">NutriCoach</span>
+            <span className="text-base font-semibold tracking-tight text-[#18181b]">NutriCoach MVP</span>
           </div>
-          <div className="flex items-center gap-3">
-            {locationStatus === 'denied' && (
-              <span className="text-xs text-[#a1a1aa]">Using default location</span>
-            )}
-            <div className="flex items-center gap-1.5">
-              <div className={`w-1.5 h-1.5 rounded-full ${backendOnline ? 'bg-green-500' : 'bg-[#d4d4d8]'}`} />
-              <span className="text-xs text-[#a1a1aa]">{backendOnline ? 'Connected' : 'Backend offline'}</span>
-            </div>
+          <div className="flex items-center gap-1.5">
+            <div className={`h-1.5 w-1.5 rounded-full ${backendOnline ? 'bg-green-500' : 'bg-[#d4d4d8]'}`} />
+            <span className="text-xs text-[#a1a1aa]">{backendOnline ? 'Connected' : 'Backend offline'}</span>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-6xl mx-auto px-6 py-6">
-        {/* Map */}
-        <section className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-medium text-[#18181b]">Nearby Food Options</h2>
-            <span className="text-xs text-[#a1a1aa]">{places.length} places found</span>
-          </div>
-          <FoodMap
-            places={places}
-            userLat={userLat}
-            userLng={userLng}
+      <main className="mx-auto grid max-w-6xl grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-5">
+        <section className="lg:col-span-2">
+          <h2 className="mb-3 text-sm font-medium text-[#18181b]">Ask the Coach</h2>
+          <ChatPanel
+            messages={chatMessages}
+            onNewMessage={handleNewMessage}
+            backendOnline={backendOnline}
           />
+          <p className="mt-2 text-xs text-[#a1a1aa]">
+            Try: log greek yogurt 150 cal 15p 12c 4f
+          </p>
         </section>
 
-        {/* Recommendations + Chat side by side */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          {/* Recommendations */}
-          <section className="lg:col-span-3">
-            <h2 className="text-sm font-medium text-[#18181b] mb-3">Recommended for You</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {recommendations.map((rec) => (
-                <RecommendationCard key={rec.id} recommendation={rec} />
+        <section className="rounded-xl border border-[#f0f0f0] bg-white p-5 lg:col-span-3">
+          <h2 className="mb-3 text-sm font-medium text-[#18181b]">Today&apos;s Log</h2>
+
+          {isLogLoading && entries.length === 0 ? (
+            <p className="text-sm text-[#a1a1aa]">Loading data from backend...</p>
+          ) : entries.length === 0 ? (
+            <p className="text-sm text-[#a1a1aa]">No entries logged today.</p>
+          ) : (
+            <div className="space-y-2">
+              {entries.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-[#18181b]">{entry.name}</p>
+                      <p className="mt-0.5 text-xs text-[#a1a1aa]">
+                        {formatDateTime(entry.logged_at)} · {entry.source}
+                      </p>
+                    </div>
+                    <p className="text-sm font-medium text-[#18181b]">{entry.calories} kcal</p>
+                  </div>
+                  <p className="mt-2 text-xs text-[#71717a]">
+                    P {entry.protein_g}g · C {entry.carbs_g}g · F {entry.fat_g}g
+                  </p>
+                </div>
               ))}
             </div>
-          </section>
+          )}
 
-          {/* Chat */}
-          <section className="lg:col-span-2">
-            <h2 className="text-sm font-medium text-[#18181b] mb-3">Ask the Coach</h2>
-            <ChatPanel
-              messages={chatMessages}
-              onNewMessage={handleNewMessage}
-              backendOnline={backendOnline}
-            />
-          </section>
-        </div>
+          {logError && <p className="mt-3 text-xs text-[#b91c1c]">{logError}</p>}
+        </section>
       </main>
     </div>
   );
