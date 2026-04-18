@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 import sqlite3
 import uuid
@@ -7,20 +10,21 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Generator, Literal
+from typing import Any, Generator, Literal
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-import os
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("LITESQL_PATH", BASE_DIR / "health.db"))
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -132,6 +136,239 @@ class ChatResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
+
+
+class ClaudeFoodEntryDraft(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    calories: int = Field(ge=0)
+    protein_g: float = Field(ge=0)
+    carbs_g: float = Field(ge=0)
+    fat_g: float = Field(ge=0)
+    logged_at: str | None = None
+
+
+class ClaudeChatPlan(BaseModel):
+    reply: str = Field(min_length=1, max_length=4000)
+    entries_to_log: list[ClaudeFoodEntryDraft] = Field(default_factory=list)
+
+
+CLAUDE_SYSTEM_PROMPT = """
+You are the assistant inside a nutrition tracking app.
+
+Return ONLY valid JSON with exactly this shape:
+{
+  "reply": "string",
+  "entries_to_log": [
+    {
+      "name": "string",
+      "calories": 0,
+      "protein_g": 0,
+      "carbs_g": 0,
+      "fat_g": 0,
+      "logged_at": "2026-04-18T14:30:00Z"
+    }
+  ]
+}
+
+Behavior rules:
+- Use `entries_to_log` only when the user asks to log/add food.
+- If nutrition values are missing or uncertain, ask a follow-up question in `reply` and keep `entries_to_log` empty.
+- You may include recommendations/coaching in `reply` when asked.
+- Keep `entries_to_log` to 10 or fewer items.
+- `logged_at` is optional; omit it if unknown.
+- Do not include any keys other than `reply` and `entries_to_log`.
+- Do not wrap JSON in markdown.
+""".strip()
+
+
+def _model_to_dict(model: BaseModel) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()  # type: ignore[attr-defined]
+    return model.dict()  # type: ignore[call-arg]
+
+
+def _validate_claude_plan(payload: dict[str, Any]) -> ClaudeChatPlan:
+    if hasattr(ClaudeChatPlan, "model_validate"):
+        return ClaudeChatPlan.model_validate(payload)  # type: ignore[attr-defined]
+    return ClaudeChatPlan.parse_obj(payload)
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stripped):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(stripped[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def normalize_logged_at(value: str | None) -> str:
+    if value is None or not value.strip():
+        return to_utc_iso(utc_now())
+    try:
+        parsed = parse_iso8601_utc(value, field_name="logged_at")
+        return to_utc_iso(parsed)
+    except APIError:
+        return to_utc_iso(utc_now())
+
+
+def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
+    maybe_entry = parse_log_message(user_message)
+    if maybe_entry is not None:
+        return ClaudeChatPlan(
+            reply=f"Logged 1 item: {maybe_entry.name}.",
+            entries_to_log=[
+                ClaudeFoodEntryDraft(
+                    name=maybe_entry.name,
+                    calories=maybe_entry.calories,
+                    protein_g=maybe_entry.protein_g,
+                    carbs_g=maybe_entry.carbs_g,
+                    fat_g=maybe_entry.fat_g,
+                    logged_at=maybe_entry.logged_at,
+                )
+            ],
+        )
+
+    return ClaudeChatPlan(
+        reply=(
+            "I can log food and suggest recommendations. "
+            "Try 'log grilled chicken 300 cal 40p 0c 8f' or ask for meal ideas."
+        ),
+        entries_to_log=[],
+    )
+
+
+class ClaudeChatEngine:
+    api_url = "https://api.anthropic.com/v1/messages"
+    anthropic_version = "2023-06-01"
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("CLAUDE_API_KEY", "").strip()
+        self.model = os.getenv("CLAUDE_MODEL", "claude-opus-4-6").strip() or "claude-opus-4-6"
+        timeout_raw = os.getenv("CLAUDE_TIMEOUT_SECONDS", "8").strip()
+        try:
+            self.timeout_seconds = max(1.0, float(timeout_raw))
+        except ValueError:
+            self.timeout_seconds = 8.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+    async def create_plan(
+        self,
+        *,
+        user_message: str,
+        today_summary: DailySummary,
+        today_entries: list[FoodEntry],
+    ) -> ClaudeChatPlan:
+        if not self.enabled:
+            raise APIError(
+                status_code=503,
+                code="upstream_error",
+                message="Claude API key is not configured",
+            )
+
+        prompt_payload = {
+            "user_message": user_message,
+            "utc_now": to_utc_iso(utc_now()),
+            "today_summary": _model_to_dict(today_summary),
+            "recent_entries_today": [_model_to_dict(entry) for entry in today_entries[-10:]],
+        }
+
+        request_payload = {
+            "model": self.model,
+            "max_tokens": 700,
+            "temperature": 0.2,
+            "system": CLAUDE_SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": json.dumps(prompt_payload, ensure_ascii=True)}],
+                }
+            ],
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": self.anthropic_version,
+            "content-type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(self.api_url, headers=headers, json=request_payload)
+        except httpx.HTTPError as exc:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Claude request failed: {exc.__class__.__name__}",
+            ) from exc
+
+        if response.status_code >= 400:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Claude request failed with status {response.status_code}",
+            )
+
+        try:
+            response_payload = response.json()
+        except ValueError as exc:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message="Claude returned invalid JSON",
+            ) from exc
+
+        text_output = self._extract_text(response_payload)
+        plan_payload = extract_json_object(text_output)
+        if plan_payload is None:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message="Claude response did not contain a valid JSON plan",
+            )
+
+        try:
+            return _validate_claude_plan(plan_payload)
+        except ValidationError as exc:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Claude response did not match expected shape: {exc.errors()}",
+            ) from exc
+
+    @staticmethod
+    def _extract_text(payload: dict[str, Any]) -> str:
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "\n".join(parts).strip()
 
 
 class SQLiteStore:
@@ -402,6 +639,7 @@ def parse_log_message(message: str) -> FoodEntryCreate | None:
 
 
 store = SQLiteStore(DB_PATH)
+claude_chat = ClaudeChatEngine()
 app = FastAPI(title="Claude Hackathon Backend")
 
 
@@ -488,16 +726,51 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     user_message = payload.message.strip()
     store.insert_chat_message(role="user", content=user_message)
 
-    created_entries: list[FoodEntry] = []
-    maybe_entry = parse_log_message(user_message)
-    if maybe_entry is not None:
-        created_entries.append(store.insert_food_entry(maybe_entry, source="chat"))
-        reply = f"Logged 1 item: {created_entries[0].name}."
+    today = today_utc_str()
+    today_summary = store.get_daily_summary(today)
+    today_entries = store.get_log_for_date(today)
+
+    if claude_chat.enabled:
+        try:
+            plan = await claude_chat.create_plan(
+                user_message=user_message,
+                today_summary=today_summary,
+                today_entries=today_entries,
+            )
+        except APIError as exc:
+            LOGGER.warning("Claude unavailable (%s): %s", exc.code, exc.message)
+            plan = fallback_chat_plan(user_message)
+        except Exception:
+            LOGGER.exception("Unexpected chat planner failure")
+            plan = fallback_chat_plan(user_message)
     else:
-        reply = (
-            "I can log food for you. Try: "
-            "'log grilled chicken 300 cal 40p 0c 8f'."
+        plan = fallback_chat_plan(user_message)
+
+    created_entries: list[FoodEntry] = []
+    for draft in plan.entries_to_log[:10]:
+        payload_to_insert = FoodEntryCreate(
+            name=draft.name,
+            calories=draft.calories,
+            protein_g=draft.protein_g,
+            carbs_g=draft.carbs_g,
+            fat_g=draft.fat_g,
+            logged_at=normalize_logged_at(draft.logged_at),
         )
+        try:
+            created_entries.append(store.insert_food_entry(payload_to_insert, source="chat"))
+        except APIError:
+            LOGGER.warning("Skipping invalid Claude-generated entry: %s", payload_to_insert)
+
+    reply = plan.reply.strip()
+    if not reply:
+        if created_entries:
+            noun = "item" if len(created_entries) == 1 else "items"
+            reply = f"Logged {len(created_entries)} {noun}."
+        else:
+            reply = (
+                "I can log food and suggest recommendations. "
+                "Try 'log grilled chicken 300 cal 40p 0c 8f' or ask for meal ideas."
+            )
 
     store.insert_chat_message(role="assistant", content=reply)
     return ChatResponse(reply=reply, created_entries=created_entries)
