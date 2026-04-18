@@ -65,7 +65,7 @@ CLAUDE_MODEL=claude-opus-4-6
 # Optional: Claude API timeout in seconds
 # CLAUDE_TIMEOUT_SECONDS=8
 # Optional: override sqlite file path
-# LITESQL_PATH=backend/litesql.db
+# LITESQL_PATH=backend/health.db
 ```
 
 4. Start the backend:
@@ -164,10 +164,10 @@ If Claude is unavailable, the backend falls back to local quick-log parsing and 
 
 ## Data persistence
 
-- Default database file: `backend/litesql.db`
+- Default database file: `backend/health.db`
 - You can override via `LITESQL_PATH` in `.env`
 - SQLite tables are auto-created at app startup
-- DB files are git-ignored (`backend/litesql.db*`)
+- DB files are git-ignored (`backend/health.db*`)
 
 ## Running tests
 
