@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -138,6 +139,24 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
 
 
+class NearbyPlace(BaseModel):
+    id: str
+    name: str
+    lat: float
+    lng: float
+    address: str
+    rating: float | None = None
+    user_ratings_total: int | None = None
+    price_level: int | None = None
+    is_open: bool | None = None
+    distance_m: int
+    maps_url: str
+
+
+class NearbyPlacesResponse(BaseModel):
+    places: list[NearbyPlace]
+
+
 class ClaudeFoodEntryDraft(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     calories: int = Field(ge=0)
@@ -252,6 +271,156 @@ def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
         ),
         entries_to_log=[],
     )
+
+
+def haversine_distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> int:
+    earth_radius_m = 6_371_000
+    lat1_rad = math.radians(lat1)
+    lng1_rad = math.radians(lng1)
+    lat2_rad = math.radians(lat2)
+    lng2_rad = math.radians(lng2)
+
+    delta_lat = lat2_rad - lat1_rad
+    delta_lng = lng2_rad - lng1_rad
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lng / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return int(round(earth_radius_m * c))
+
+
+class GooglePlacesEngine:
+    api_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+    async def nearby_restaurants(
+        self,
+        *,
+        lat: float,
+        lng: float,
+        radius_m: int,
+        limit: int,
+    ) -> list[NearbyPlace]:
+        if not self.enabled:
+            raise APIError(
+                status_code=503,
+                code="upstream_error",
+                message="Google Maps API key is not configured",
+            )
+
+        params = {
+            "key": self.api_key,
+            "location": f"{lat},{lng}",
+            "radius": str(radius_m),
+            "type": "restaurant",
+            "keyword": "healthy food",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(self.api_url, params=params)
+        except httpx.HTTPError as exc:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Google Places request failed: {exc.__class__.__name__}",
+            ) from exc
+
+        if response.status_code >= 400:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Google Places request failed with status {response.status_code}",
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message="Google Places returned invalid JSON",
+            ) from exc
+
+        google_status = str(payload.get("status", ""))
+        if google_status == "ZERO_RESULTS":
+            return []
+        if google_status != "OK":
+            upstream_message = payload.get("error_message")
+            message_suffix = f": {upstream_message}" if isinstance(upstream_message, str) else ""
+            raise APIError(
+                status_code=502,
+                code="upstream_error",
+                message=f"Google Places request failed ({google_status}){message_suffix}",
+            )
+
+        results = payload.get("results")
+        if not isinstance(results, list):
+            return []
+
+        places: list[NearbyPlace] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+
+            place_id = result.get("place_id")
+            name = result.get("name")
+            if not isinstance(place_id, str) or not isinstance(name, str):
+                continue
+
+            geometry = result.get("geometry")
+            location = geometry.get("location") if isinstance(geometry, dict) else None
+            place_lat = location.get("lat") if isinstance(location, dict) else None
+            place_lng = location.get("lng") if isinstance(location, dict) else None
+            if not isinstance(place_lat, (float, int)) or not isinstance(place_lng, (float, int)):
+                continue
+
+            address_raw = result.get("vicinity")
+            if not isinstance(address_raw, str) or not address_raw.strip():
+                formatted_address = result.get("formatted_address")
+                address = formatted_address.strip() if isinstance(formatted_address, str) else "Address unavailable"
+            else:
+                address = address_raw.strip()
+
+            rating_raw = result.get("rating")
+            rating = float(rating_raw) if isinstance(rating_raw, (float, int)) else None
+
+            ratings_count_raw = result.get("user_ratings_total")
+            ratings_count = int(ratings_count_raw) if isinstance(ratings_count_raw, int) else None
+
+            price_level_raw = result.get("price_level")
+            price_level = int(price_level_raw) if isinstance(price_level_raw, int) else None
+
+            opening_hours = result.get("opening_hours")
+            open_now_raw = opening_hours.get("open_now") if isinstance(opening_hours, dict) else None
+            is_open = open_now_raw if isinstance(open_now_raw, bool) else None
+
+            places.append(
+                NearbyPlace(
+                    id=place_id,
+                    name=name,
+                    lat=float(place_lat),
+                    lng=float(place_lng),
+                    address=address,
+                    rating=rating,
+                    user_ratings_total=ratings_count,
+                    price_level=price_level,
+                    is_open=is_open,
+                    distance_m=haversine_distance_m(lat, lng, float(place_lat), float(place_lng)),
+                    maps_url=f"https://www.google.com/maps/place/?q=place_id:{place_id}",
+                )
+            )
+
+        places.sort(key=lambda place: place.distance_m)
+        return places[:limit]
 
 
 class ClaudeChatEngine:
@@ -640,6 +809,7 @@ def parse_log_message(message: str) -> FoodEntryCreate | None:
 
 store = SQLiteStore(DB_PATH)
 claude_chat = ClaudeChatEngine()
+google_places = GooglePlacesEngine()
 app = FastAPI(title="Claude Hackathon Backend")
 
 
@@ -689,6 +859,22 @@ async def handle_unexpected_error(_request, _exc: Exception) -> JSONResponse:
 @app.get("/api/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@app.get("/api/maps/nearby", response_model=NearbyPlacesResponse)
+async def maps_nearby(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius_m: int = Query(default=1200, ge=100, le=50000),
+    limit: int = Query(default=12, ge=1, le=20),
+) -> NearbyPlacesResponse:
+    places = await google_places.nearby_restaurants(
+        lat=lat,
+        lng=lng,
+        radius_m=radius_m,
+        limit=limit,
+    )
+    return NearbyPlacesResponse(places=places)
 
 
 @app.get("/api/log", response_model=FoodLogResponse)

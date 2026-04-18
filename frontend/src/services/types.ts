@@ -1,3 +1,21 @@
+export interface NearbyPlace {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  address: string;
+  rating: number | null;
+  user_ratings_total: number | null;
+  price_level: number | null;
+  is_open: boolean | null;
+  distance_m: number;
+  maps_url: string;
+}
+
+export interface NearbyPlacesResponse {
+  places: NearbyPlace[];
+}
+
 export interface FoodEntry {
   id: string;
   name: string;

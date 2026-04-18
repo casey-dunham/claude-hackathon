@@ -6,6 +6,7 @@ import type {
   FoodEntry,
   FoodLogResponse,
   HealthResponse,
+  NearbyPlacesResponse,
 } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
@@ -87,6 +88,20 @@ async function request<T>(
 
 export async function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/api/health");
+}
+
+export async function getNearbyPlaces(
+  lat: number,
+  lng: number,
+  radiusM = 1200,
+  limit = 12
+): Promise<NearbyPlacesResponse> {
+  return request<NearbyPlacesResponse>("/api/maps/nearby", undefined, {
+    lat,
+    lng,
+    radius_m: radiusM,
+    limit,
+  });
 }
 
 export async function getTodaySummary(): Promise<DailySummary> {

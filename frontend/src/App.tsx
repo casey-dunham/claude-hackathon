@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react';
 import ChatPanel from './components/ChatPanel';
-import { getChatHistory, getHealth, getLog } from './services/api';
-import { ChatMessage, FoodEntry } from './services/types';
+import FoodMap from './components/FoodMap';
+import { getChatHistory, getHealth, getLog, getNearbyPlaces } from './services/api';
+import { ChatMessage, FoodEntry, NearbyPlace } from './services/types';
+
+const DEFAULT_LAT = 40.7549;
+const DEFAULT_LNG = -73.984;
 
 function sortEntries(entries: FoodEntry[]): FoodEntry[] {
   return [...entries].sort(
@@ -26,16 +30,61 @@ function errorMessage(error: unknown): string {
 }
 
 export default function App() {
+  const [userLat, setUserLat] = useState(DEFAULT_LAT);
+  const [userLng, setUserLng] = useState(DEFAULT_LNG);
+  const [places, setPlaces] = useState<NearbyPlace[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [entries, setEntries] = useState<FoodEntry[]>([]);
   const [backendOnline, setBackendOnline] = useState(false);
+  const [isPlacesLoading, setIsPlacesLoading] = useState(false);
+  const [placesError, setPlacesError] = useState<string | null>(null);
   const [isLogLoading, setIsLogLoading] = useState(true);
   const [logError, setLogError] = useState<string | null>(null);
+  const [locationStatus, setLocationStatus] = useState<'loading' | 'granted' | 'denied'>('loading');
 
   async function refreshLog() {
     const response = await getLog();
     setEntries(sortEntries(response.entries));
   }
+
+  async function refreshNearbyPlaces(lat: number, lng: number) {
+    setIsPlacesLoading(true);
+    setPlacesError(null);
+    try {
+      const response = await getNearbyPlaces(lat, lng);
+      setPlaces(response.places);
+    } catch (error) {
+      setPlacesError(errorMessage(error));
+      setPlaces([]);
+    } finally {
+      setIsPlacesLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      setLocationStatus('denied');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        setUserLat(lat);
+        setUserLng(lng);
+        setLocationStatus('granted');
+      },
+      () => {
+        setLocationStatus('denied');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }, []);
+
+  useEffect(() => {
+    void refreshNearbyPlaces(userLat, userLng);
+  }, [userLat, userLng]);
 
   useEffect(() => {
     let mounted = true;
@@ -107,6 +156,18 @@ export default function App() {
       </header>
 
       <main className="mx-auto grid max-w-6xl grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-5">
+        <section className="lg:col-span-5">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-medium text-[#18181b]">Nearby Healthy Food</h2>
+            <div className="flex items-center gap-2 text-xs text-[#a1a1aa]">
+              {locationStatus === 'denied' && <span>Using default location</span>}
+              <span>{isPlacesLoading ? 'Loading places...' : `${places.length} places`}</span>
+            </div>
+          </div>
+          <FoodMap userLat={userLat} userLng={userLng} places={places} />
+          {placesError && <p className="mt-2 text-xs text-[#b91c1c]">{placesError}</p>}
+        </section>
+
         <section className="lg:col-span-2">
           <h2 className="mb-3 text-sm font-medium text-[#18181b]">Ask the Coach</h2>
           <ChatPanel
@@ -151,6 +212,34 @@ export default function App() {
           )}
 
           {logError && <p className="mt-3 text-xs text-[#b91c1c]">{logError}</p>}
+        </section>
+
+        <section className="rounded-xl border border-[#f0f0f0] bg-white p-5 lg:col-span-5">
+          <h2 className="mb-3 text-sm font-medium text-[#18181b]">Nearby Places</h2>
+          {places.length === 0 ? (
+            <p className="text-sm text-[#a1a1aa]">No places found.</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {places.map((place) => (
+                <a
+                  key={place.id}
+                  href={place.maps_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-3 py-2 hover:border-[#d4d4d8]"
+                >
+                  <p className="text-sm font-medium text-[#18181b]">{place.name}</p>
+                  <p className="mt-0.5 text-xs text-[#a1a1aa]">{place.address}</p>
+                  <p className="mt-1 text-xs text-[#71717a]">
+                    {place.distance_m}m away
+                    {place.rating !== null ? ` · ${place.rating.toFixed(1)}★` : ''}
+                    {place.is_open === true ? ' · Open now' : ''}
+                    {place.is_open === false ? ' · Closed now' : ''}
+                  </p>
+                </a>
+              ))}
+            </div>
+          )}
         </section>
       </main>
     </div>
