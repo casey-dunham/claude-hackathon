@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { ChatMessage } from '../services/types';
+import { ChatContextInput, ChatMessage } from '../services/types';
 import { sendChatMessage } from '../services/api';
 
 interface Props {
@@ -84,7 +84,7 @@ export default function ChatPanel({ messages, onNewMessage, backendOnline, userL
           <div className="flex items-center justify-center h-full">
             <p className="text-xs text-[#a1a1aa] text-center leading-relaxed">
               Ask me about healthy food options nearby,<br />
-              nutrition info, or dietary recommendations.
+              nutrition info, or say "delete last" to remove a log item.
             </p>
           </div>
         )}

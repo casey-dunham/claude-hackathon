@@ -43,6 +43,13 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface ChatContextInput {
+  lat?: number;
+  lng?: number;
+  timezone?: string;
+  local_time?: string;
+}
+
 export interface FoodLogResponse {
   entries: FoodEntry[];
 }

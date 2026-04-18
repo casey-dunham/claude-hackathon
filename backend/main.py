@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -115,6 +116,13 @@ class DashboardHistoryResponse(BaseModel):
     days: list[DailySummary]
 
 
+class ChatContext(BaseModel):
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    local_time: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     lat: float | None = None
@@ -203,6 +211,9 @@ Behavior rules:
 - Use `entries_to_log` only when the user asks to log/add food.
 - If nutrition values are missing or uncertain, ask a follow-up question in `reply` and keep `entries_to_log` empty.
 - You may include recommendations/coaching in `reply` when asked.
+- When recommendations are requested, use `chat_context.local_time`, `chat_context.meal_window`, and `chat_context.nearby_restaurants`.
+- If nearby restaurants are available, mention 2-4 places by name and explain why they fit the meal timing and nutrition goal.
+- Use `today_summary` and `recent_entries_today` to keep recommendations aligned with the current day.
 - Keep `entries_to_log` to 10 or fewer items.
 - `logged_at` is optional; omit it if unknown.
 - Do not include any keys other than `reply` and `entries_to_log`.
@@ -260,7 +271,85 @@ def normalize_logged_at(value: str | None) -> str:
         return to_utc_iso(utc_now())
 
 
-def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
+def parse_optional_iso_datetime(value: str | None) -> datetime | None:
+    if value is None or not value.strip():
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def resolve_timezone(value: str | None) -> ZoneInfo | None:
+    if value is None:
+        return None
+
+    tz_name = value.strip()
+    if not tz_name:
+        return None
+
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        LOGGER.warning("Invalid timezone provided in chat context: %s", tz_name)
+        return None
+
+
+def meal_window_for_hour(hour: int) -> str:
+    if 5 <= hour < 11:
+        return "breakfast"
+    if 11 <= hour < 15:
+        return "lunch"
+    if 15 <= hour < 17:
+        return "afternoon_snack"
+    if 17 <= hour < 22:
+        return "dinner"
+    return "late_night"
+
+
+def resolve_chat_time_context(context: ChatContext | None) -> tuple[datetime, str, str]:
+    tzinfo = resolve_timezone(context.timezone if context else None)
+    parsed_local = parse_optional_iso_datetime(context.local_time if context else None)
+
+    if parsed_local is None:
+        local_dt = utc_now().astimezone(tzinfo or timezone.utc)
+    else:
+        if parsed_local.tzinfo is None:
+            local_dt = parsed_local.replace(tzinfo=tzinfo or timezone.utc)
+        elif tzinfo is not None:
+            local_dt = parsed_local.astimezone(tzinfo)
+        else:
+            local_dt = parsed_local
+
+    if context and context.timezone and tzinfo is not None:
+        timezone_name = context.timezone.strip()
+    else:
+        timezone_name = str(local_dt.tzinfo) if local_dt.tzinfo is not None else "UTC"
+    meal_window = meal_window_for_hour(local_dt.hour)
+    return local_dt, timezone_name, meal_window
+
+
+def nearby_places_for_prompt(places: list[NearbyPlace]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": place.name,
+            "address": place.address,
+            "distance_m": place.distance_m,
+            "rating": place.rating,
+            "price_level": place.price_level,
+            "is_open": place.is_open,
+        }
+        for place in places
+    ]
+
+
+def fallback_chat_plan(
+    user_message: str,
+    *,
+    meal_window: str | None = None,
+    nearby_places: list[NearbyPlace] | None = None,
+) -> ClaudeChatPlan:
     maybe_entry = parse_log_message(user_message)
     if maybe_entry is not None:
         return ClaudeChatPlan(
@@ -275,6 +364,30 @@ def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
                     logged_at=maybe_entry.logged_at,
                 )
             ],
+        )
+
+    nearby_places = nearby_places or []
+    user_text = user_message.lower()
+    wants_recommendations = any(
+        token in user_text
+        for token in ("recommend", "nearby", "restaurant", "food", "meal", "eat", "breakfast", "lunch", "dinner")
+    )
+
+    if wants_recommendations and nearby_places:
+        nearby_lines: list[str] = []
+        for place in nearby_places[:3]:
+            rating_label = f", {place.rating:.1f}★" if place.rating is not None else ""
+            open_label = "open now" if place.is_open is True else "currently closed" if place.is_open is False else "hours unknown"
+            nearby_lines.append(f"{place.name} ({place.distance_m}m away{rating_label}, {open_label})")
+
+        meal_label = (meal_window or "current").replace("_", " ")
+        return ClaudeChatPlan(
+            reply=(
+                f"For {meal_label}, here are nearby options: "
+                + "; ".join(nearby_lines)
+                + ". Tell me your macro target and I can narrow this further."
+            ),
+            entries_to_log=[],
         )
 
     return ClaudeChatPlan(
@@ -877,6 +990,51 @@ LOG_MESSAGE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+DELETE_INTENT_PATTERN = re.compile(r"\b(delete|remove|unlog|undo)\b", flags=re.IGNORECASE)
+DELETE_LOG_CONTEXT_PATTERN = re.compile(
+    r"\b(log|logged|add|added|track|tracked|entry|entries|tracker|food\s*log|meal\s*log)\b",
+    flags=re.IGNORECASE,
+)
+EXPLICIT_DELETE_COMMAND_PATTERN = re.compile(r"^\s*(delete|unlog)\b", flags=re.IGNORECASE)
+DELETE_LAST_PATTERN = re.compile(r"\b(delete|remove|unlog|undo)\s+(?:the\s+)?(last|latest)\b", flags=re.IGNORECASE)
+UUID_PATTERN = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    flags=re.IGNORECASE,
+)
+DELETE_NAME_PATTERN = re.compile(
+    r"\b(?:delete|remove|unlog)\s+(?:the\s+)?(?:entry\s+)?(?P<name>.+)$",
+    flags=re.IGNORECASE,
+)
+LOG_CREATE_INTENT_PATTERN = re.compile(r"\b(log|add|track)\b", flags=re.IGNORECASE)
+DELETE_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "my",
+    "our",
+    "your",
+    "this",
+    "that",
+    "it",
+    "meal",
+    "food",
+    "entry",
+    "item",
+    "i",
+    "we",
+    "logged",
+    "added",
+    "tracked",
+    "earlier",
+    "today",
+    "yesterday",
+    "just",
+    "please",
+    "from",
+    "in",
+    "log",
+}
+
 
 def parse_log_message(message: str) -> FoodEntryCreate | None:
     match = LOG_MESSAGE_PATTERN.match(message)
@@ -891,6 +1049,66 @@ def parse_log_message(message: str) -> FoodEntryCreate | None:
         fat_g=float(match.group("fat")),
         logged_at=to_utc_iso(utc_now()),
     )
+
+
+def normalize_delete_name(raw_name: str) -> str:
+    trimmed = raw_name.strip().lower()
+    trimmed = re.sub(r"\b(from|in)\s+(my|the)?\s*log\b.*$", "", trimmed)
+    trimmed = re.sub(r"\b(?:that\s+)?(?:i|we)\s+(?:logged|added|tracked)\b.*$", "", trimmed)
+    trimmed = re.sub(r"\b(?:earlier|today|yesterday|just now)\b.*$", "", trimmed)
+    trimmed = re.sub(r"^(the|my|our|a|an)\s+", "", trimmed)
+    trimmed = re.sub(r"\b(today|please)\b", "", trimmed)
+    trimmed = re.sub(r"[^\w\s-]", "", trimmed)
+    return " ".join(trimmed.split())
+
+
+def resolve_delete_target(message: str, entries: list[FoodEntry]) -> tuple[FoodEntry | None, bool]:
+    has_delete_verb = DELETE_INTENT_PATTERN.search(message) is not None
+    if not has_delete_verb:
+        return None, False
+
+    has_log_context = DELETE_LOG_CONTEXT_PATTERN.search(message) is not None
+    has_explicit_command = EXPLICIT_DELETE_COMMAND_PATTERN.search(message) is not None
+    has_last_phrase = DELETE_LAST_PATTERN.search(message) is not None
+    has_uuid = UUID_PATTERN.search(message) is not None
+    clear_delete_signal = has_log_context or has_explicit_command or has_last_phrase or has_uuid
+
+    if not entries:
+        return None, clear_delete_signal
+
+    ordered_entries = sorted(entries, key=lambda entry: entry.logged_at, reverse=True)
+    lowered_message = message.lower()
+
+    if has_last_phrase or "last" in lowered_message or "latest" in lowered_message:
+        return ordered_entries[0], True
+
+    id_match = UUID_PATTERN.search(message)
+    if id_match is not None:
+        target_id = id_match.group(0).lower()
+        for entry in ordered_entries:
+            if entry.id.lower() == target_id:
+                return entry, True
+
+    name_match = DELETE_NAME_PATTERN.search(message)
+    if name_match is not None:
+        normalized_query = normalize_delete_name(name_match.group("name"))
+        if normalized_query:
+            for entry in ordered_entries:
+                if entry.name.strip().lower() == normalized_query:
+                    return entry, True
+
+            query_tokens = [
+                token
+                for token in normalized_query.split()
+                if token and token not in DELETE_TOKEN_STOPWORDS
+            ]
+            if query_tokens:
+                for entry in ordered_entries:
+                    name_lower = entry.name.strip().lower()
+                    if all(token in name_lower for token in query_tokens):
+                        return entry, True
+
+    return None, clear_delete_signal
 
 
 store = SQLiteStore(DB_PATH)
@@ -1026,15 +1244,32 @@ async def chat(payload: ChatRequest) -> ChatResponse:
             )
         except APIError as exc:
             LOGGER.warning("Claude unavailable (%s): %s", exc.code, exc.message)
-            plan = fallback_chat_plan(user_message)
+            plan = fallback_chat_plan(
+                user_message,
+                meal_window=meal_window,
+                nearby_places=nearby_places,
+            )
         except Exception:
             LOGGER.exception("Unexpected chat planner failure")
-            plan = fallback_chat_plan(user_message)
+            plan = fallback_chat_plan(
+                user_message,
+                meal_window=meal_window,
+                nearby_places=nearby_places,
+            )
     else:
-        plan = fallback_chat_plan(user_message)
+        plan = fallback_chat_plan(
+            user_message,
+            meal_window=meal_window,
+            nearby_places=nearby_places,
+        )
 
     created_entries: list[FoodEntry] = []
-    for draft in plan.entries_to_log[:10]:
+    allow_log_creation = bool(LOG_CREATE_INTENT_PATTERN.search(user_message))
+    entries_to_insert = plan.entries_to_log[:10] if allow_log_creation else []
+    if plan.entries_to_log and not allow_log_creation:
+        LOGGER.info("Ignoring Claude entries_to_log because user message did not request log adjustment")
+
+    for draft in entries_to_insert:
         payload_to_insert = FoodEntryCreate(
             name=draft.name,
             calories=draft.calories,

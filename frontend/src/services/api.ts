@@ -1,4 +1,5 @@
 import type {
+  ChatContextInput,
   ChatHistoryResponse,
   ChatResponse,
   CreateFoodEntryInput,

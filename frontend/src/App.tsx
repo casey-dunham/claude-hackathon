@@ -32,6 +32,39 @@ function errorMessage(error: unknown): string {
   return 'Unable to load data from backend.';
 }
 
+function mealWindowForHour(hour: number): 'breakfast' | 'lunch' | 'afternoon snack' | 'dinner' | 'late night' {
+  if (hour >= 5 && hour < 11) return 'breakfast';
+  if (hour >= 11 && hour < 15) return 'lunch';
+  if (hour >= 15 && hour < 17) return 'afternoon snack';
+  if (hour >= 17 && hour < 22) return 'dinner';
+  return 'late night';
+}
+
+function recommendationScore(place: NearbyPlace): number {
+  const openScore = place.is_open === true ? 30 : place.is_open === false ? -20 : 0;
+  const ratingScore = (place.rating ?? 3.5) * 10;
+  const distancePenalty = Math.min(place.distance_m, 2500) / 100;
+  return openScore + ratingScore - distancePenalty;
+}
+
+function LogSourceIcon({ source }: { source: FoodEntry['source'] }) {
+  if (source === 'chat') {
+    return (
+      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-[#2563eb]" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M21 11.5a8.5 8.5 0 1 1-4.2-7.4" />
+        <path d="M21 4v6h-6" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-[#16a34a]" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('log');
   const [userLat, setUserLat] = useState(DEFAULT_LAT);
@@ -45,6 +78,11 @@ export default function App() {
   const [isLogLoading, setIsLogLoading] = useState(true);
   const [logError, setLogError] = useState<string | null>(null);
   const [locationStatus, setLocationStatus] = useState<'loading' | 'granted' | 'denied'>('loading');
+  const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const currentMealWindow = mealWindowForHour(new Date().getHours());
+  const recommendedPlaces = [...places]
+    .sort((a, b) => recommendationScore(b) - recommendationScore(a))
+    .slice(0, 4);
 
   async function refreshLog() {
     const response = await getLog();
