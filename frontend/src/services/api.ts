@@ -1,4 +1,5 @@
 import type {
+  ChatContextInput,
   ChatHistoryResponse,
   ChatResponse,
   CreateFoodEntryInput,
@@ -127,13 +128,13 @@ export async function getChatHistory(limit = 50): Promise<ChatHistoryResponse> {
   return request<ChatHistoryResponse>("/api/chat/history", undefined, { limit });
 }
 
-export async function postChat(message: string): Promise<ChatResponse> {
+export async function postChat(message: string, context?: ChatContextInput): Promise<ChatResponse> {
   return request<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, ...(context ? { context } : {}) }),
   });
 }
 
-export async function sendChatMessage(message: string): Promise<ChatResponse> {
-  return postChat(message);
+export async function sendChatMessage(message: string, context?: ChatContextInput): Promise<ChatResponse> {
+  return postChat(message, context);
 }

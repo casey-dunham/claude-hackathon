@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -115,8 +116,16 @@ class DashboardHistoryResponse(BaseModel):
     days: list[DailySummary]
 
 
+class ChatContext(BaseModel):
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    local_time: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+    context: ChatContext | None = None
 
 
 class ChatMessage(BaseModel):
@@ -193,6 +202,9 @@ Behavior rules:
 - Use `entries_to_log` only when the user asks to log/add food.
 - If nutrition values are missing or uncertain, ask a follow-up question in `reply` and keep `entries_to_log` empty.
 - You may include recommendations/coaching in `reply` when asked.
+- When recommendations are requested, use `chat_context.local_time`, `chat_context.meal_window`, and `chat_context.nearby_restaurants`.
+- If nearby restaurants are available, mention 2-4 places by name and explain why they fit the meal timing and nutrition goal.
+- Use `today_summary` and `recent_entries_today` to keep recommendations aligned with the current day.
 - Keep `entries_to_log` to 10 or fewer items.
 - `logged_at` is optional; omit it if unknown.
 - Do not include any keys other than `reply` and `entries_to_log`.
@@ -247,7 +259,85 @@ def normalize_logged_at(value: str | None) -> str:
         return to_utc_iso(utc_now())
 
 
-def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
+def parse_optional_iso_datetime(value: str | None) -> datetime | None:
+    if value is None or not value.strip():
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def resolve_timezone(value: str | None) -> ZoneInfo | None:
+    if value is None:
+        return None
+
+    tz_name = value.strip()
+    if not tz_name:
+        return None
+
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        LOGGER.warning("Invalid timezone provided in chat context: %s", tz_name)
+        return None
+
+
+def meal_window_for_hour(hour: int) -> str:
+    if 5 <= hour < 11:
+        return "breakfast"
+    if 11 <= hour < 15:
+        return "lunch"
+    if 15 <= hour < 17:
+        return "afternoon_snack"
+    if 17 <= hour < 22:
+        return "dinner"
+    return "late_night"
+
+
+def resolve_chat_time_context(context: ChatContext | None) -> tuple[datetime, str, str]:
+    tzinfo = resolve_timezone(context.timezone if context else None)
+    parsed_local = parse_optional_iso_datetime(context.local_time if context else None)
+
+    if parsed_local is None:
+        local_dt = utc_now().astimezone(tzinfo or timezone.utc)
+    else:
+        if parsed_local.tzinfo is None:
+            local_dt = parsed_local.replace(tzinfo=tzinfo or timezone.utc)
+        elif tzinfo is not None:
+            local_dt = parsed_local.astimezone(tzinfo)
+        else:
+            local_dt = parsed_local
+
+    if context and context.timezone and tzinfo is not None:
+        timezone_name = context.timezone.strip()
+    else:
+        timezone_name = str(local_dt.tzinfo) if local_dt.tzinfo is not None else "UTC"
+    meal_window = meal_window_for_hour(local_dt.hour)
+    return local_dt, timezone_name, meal_window
+
+
+def nearby_places_for_prompt(places: list[NearbyPlace]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": place.name,
+            "address": place.address,
+            "distance_m": place.distance_m,
+            "rating": place.rating,
+            "price_level": place.price_level,
+            "is_open": place.is_open,
+        }
+        for place in places
+    ]
+
+
+def fallback_chat_plan(
+    user_message: str,
+    *,
+    meal_window: str | None = None,
+    nearby_places: list[NearbyPlace] | None = None,
+) -> ClaudeChatPlan:
     maybe_entry = parse_log_message(user_message)
     if maybe_entry is not None:
         return ClaudeChatPlan(
@@ -262,6 +352,30 @@ def fallback_chat_plan(user_message: str) -> ClaudeChatPlan:
                     logged_at=maybe_entry.logged_at,
                 )
             ],
+        )
+
+    nearby_places = nearby_places or []
+    user_text = user_message.lower()
+    wants_recommendations = any(
+        token in user_text
+        for token in ("recommend", "nearby", "restaurant", "food", "meal", "eat", "breakfast", "lunch", "dinner")
+    )
+
+    if wants_recommendations and nearby_places:
+        nearby_lines: list[str] = []
+        for place in nearby_places[:3]:
+            rating_label = f", {place.rating:.1f}★" if place.rating is not None else ""
+            open_label = "open now" if place.is_open is True else "currently closed" if place.is_open is False else "hours unknown"
+            nearby_lines.append(f"{place.name} ({place.distance_m}m away{rating_label}, {open_label})")
+
+        meal_label = (meal_window or "current").replace("_", " ")
+        return ClaudeChatPlan(
+            reply=(
+                f"For {meal_label}, here are nearby options: "
+                + "; ".join(nearby_lines)
+                + ". Tell me your macro target and I can narrow this further."
+            ),
+            entries_to_log=[],
         )
 
     return ClaudeChatPlan(
@@ -446,6 +560,7 @@ class ClaudeChatEngine:
         user_message: str,
         today_summary: DailySummary,
         today_entries: list[FoodEntry],
+        chat_context: dict[str, Any] | None = None,
     ) -> ClaudeChatPlan:
         if not self.enabled:
             raise APIError(
@@ -459,6 +574,7 @@ class ClaudeChatEngine:
             "utc_now": to_utc_iso(utc_now()),
             "today_summary": _model_to_dict(today_summary),
             "recent_entries_today": [_model_to_dict(entry) for entry in today_entries[-10:]],
+            "chat_context": chat_context or {},
         }
 
         request_payload = {
@@ -915,6 +1031,31 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     today = today_utc_str()
     today_summary = store.get_daily_summary(today)
     today_entries = store.get_log_for_date(today)
+    local_dt, timezone_name, meal_window = resolve_chat_time_context(payload.context)
+
+    lat = payload.context.lat if payload.context else None
+    lng = payload.context.lng if payload.context else None
+    nearby_places: list[NearbyPlace] = []
+    if lat is not None and lng is not None and google_places.enabled:
+        try:
+            nearby_places = await google_places.nearby_restaurants(
+                lat=lat,
+                lng=lng,
+                radius_m=1800,
+                limit=8,
+            )
+        except APIError as exc:
+            LOGGER.warning("Google Places unavailable during chat (%s): %s", exc.code, exc.message)
+        except Exception:
+            LOGGER.exception("Unexpected Google Places failure during chat")
+
+    chat_prompt_context = {
+        "local_time": local_dt.isoformat(),
+        "timezone": timezone_name,
+        "meal_window": meal_window,
+        "location": {"lat": lat, "lng": lng} if lat is not None and lng is not None else None,
+        "nearby_restaurants": nearby_places_for_prompt(nearby_places),
+    }
 
     if claude_chat.enabled:
         try:
@@ -922,15 +1063,28 @@ async def chat(payload: ChatRequest) -> ChatResponse:
                 user_message=user_message,
                 today_summary=today_summary,
                 today_entries=today_entries,
+                chat_context=chat_prompt_context,
             )
         except APIError as exc:
             LOGGER.warning("Claude unavailable (%s): %s", exc.code, exc.message)
-            plan = fallback_chat_plan(user_message)
+            plan = fallback_chat_plan(
+                user_message,
+                meal_window=meal_window,
+                nearby_places=nearby_places,
+            )
         except Exception:
             LOGGER.exception("Unexpected chat planner failure")
-            plan = fallback_chat_plan(user_message)
+            plan = fallback_chat_plan(
+                user_message,
+                meal_window=meal_window,
+                nearby_places=nearby_places,
+            )
     else:
-        plan = fallback_chat_plan(user_message)
+        plan = fallback_chat_plan(
+            user_message,
+            meal_window=meal_window,
+            nearby_places=nearby_places,
+        )
 
     created_entries: list[FoodEntry] = []
     for draft in plan.entries_to_log[:10]:

@@ -29,6 +29,21 @@ function errorMessage(error: unknown): string {
   return 'Unable to load data from backend.';
 }
 
+function mealWindowForHour(hour: number): 'breakfast' | 'lunch' | 'afternoon snack' | 'dinner' | 'late night' {
+  if (hour >= 5 && hour < 11) return 'breakfast';
+  if (hour >= 11 && hour < 15) return 'lunch';
+  if (hour >= 15 && hour < 17) return 'afternoon snack';
+  if (hour >= 17 && hour < 22) return 'dinner';
+  return 'late night';
+}
+
+function recommendationScore(place: NearbyPlace): number {
+  const openScore = place.is_open === true ? 30 : place.is_open === false ? -20 : 0;
+  const ratingScore = (place.rating ?? 3.5) * 10;
+  const distancePenalty = Math.min(place.distance_m, 2500) / 100;
+  return openScore + ratingScore - distancePenalty;
+}
+
 export default function App() {
   const [userLat, setUserLat] = useState(DEFAULT_LAT);
   const [userLng, setUserLng] = useState(DEFAULT_LNG);
@@ -41,6 +56,11 @@ export default function App() {
   const [isLogLoading, setIsLogLoading] = useState(true);
   const [logError, setLogError] = useState<string | null>(null);
   const [locationStatus, setLocationStatus] = useState<'loading' | 'granted' | 'denied'>('loading');
+  const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const currentMealWindow = mealWindowForHour(new Date().getHours());
+  const recommendedPlaces = [...places]
+    .sort((a, b) => recommendationScore(b) - recommendationScore(a))
+    .slice(0, 4);
 
   async function refreshLog() {
     const response = await getLog();
@@ -174,9 +194,14 @@ export default function App() {
             messages={chatMessages}
             onNewMessage={handleNewMessage}
             backendOnline={backendOnline}
+            chatContext={{
+              lat: userLat,
+              lng: userLng,
+              timezone: userTimezone,
+            }}
           />
           <p className="mt-2 text-xs text-[#a1a1aa]">
-            Try: log greek yogurt 150 cal 15p 12c 4f
+            Try: Recommend a high-protein {currentMealWindow} near me
           </p>
         </section>
 
@@ -215,12 +240,14 @@ export default function App() {
         </section>
 
         <section className="rounded-xl border border-[#f0f0f0] bg-white p-5 lg:col-span-5">
-          <h2 className="mb-3 text-sm font-medium text-[#18181b]">Nearby Places</h2>
-          {places.length === 0 ? (
+          <h2 className="mb-3 text-sm font-medium text-[#18181b]">
+            Recommended for {currentMealWindow}
+          </h2>
+          {recommendedPlaces.length === 0 ? (
             <p className="text-sm text-[#a1a1aa]">No places found.</p>
           ) : (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {places.map((place) => (
+              {recommendedPlaces.map((place) => (
                 <a
                   key={place.id}
                   href={place.maps_url}

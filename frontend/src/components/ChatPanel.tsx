@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
-import { ChatMessage } from '../services/types';
+import { ChatContextInput, ChatMessage } from '../services/types';
 import { sendChatMessage } from '../services/api';
 
 interface Props {
   messages: ChatMessage[];
   onNewMessage: (userMsg: ChatMessage, assistantMsg: ChatMessage) => void;
   backendOnline: boolean;
+  chatContext?: ChatContextInput;
 }
 
-export default function ChatPanel({ messages, onNewMessage, backendOnline }: Props) {
+export default function ChatPanel({ messages, onNewMessage, backendOnline, chatContext }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -33,7 +34,10 @@ export default function ChatPanel({ messages, onNewMessage, backendOnline }: Pro
 
     try {
       if (backendOnline) {
-        const res = await sendChatMessage(text);
+        const res = await sendChatMessage(text, {
+          ...chatContext,
+          local_time: new Date().toISOString(),
+        });
         const assistantMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',
