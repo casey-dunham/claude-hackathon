@@ -20,7 +20,7 @@ import os
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("LITESQL_PATH", BASE_DIR / "litesql.db"))
+DB_PATH = Path(os.getenv("LITESQL_PATH", BASE_DIR / "health.db"))
 
 
 def utc_now() -> datetime:
